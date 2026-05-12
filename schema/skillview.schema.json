@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skillview.local/schemas/inventory.json",
+  "title": "Skillview Inventory",
+  "type": "object",
+  "required": ["schema_version", "generated_at", "roots", "skills", "clusters", "stats"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "generated_at":   { "type": "string", "format": "date-time" },
+    "roots": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Root" }
+    },
+    "skills": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Skill" }
+    },
+    "clusters": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Cluster" }
+    },
+    "stats": { "$ref": "#/$defs/Stats" }
+  },
+  "$defs": {
+    "Root": {
+      "type": "object",
+      "required": ["id", "kind", "path"],
+      "properties": {
+        "id":   { "type": "string" },
+        "kind": {
+          "type": "string",
+          "enum": ["claude-global", "claude-project", "codex", "cursor", "agents-generic", "unknown"]
+        },
+        "path": { "type": "string" }
+      }
+    },
+    "Frontmatter": {
+      "type": "object",
+      "properties": {
+        "name":        { "type": "string" },
+        "description": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "Asset": {
+      "type": "object",
+      "required": ["path", "size_bytes", "referenced"],
+      "properties": {
+        "path":       { "type": "string" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "referenced": { "type": "boolean" }
+      }
+    },
+    "Skill": {
+      "type": "object",
+      "required": ["id", "tier", "name", "path", "dir", "agent", "root_id", "content_hash", "assets"],
+      "properties": {
+        "id":   { "type": "string" },
+        "tier": { "type": "string", "enum": ["primary", "secondary"] },
+        "name": { "type": "string" },
+        "path": { "type": "string" },
+        "dir":  { "type": "string" },
+        "agent":{ "type": "string" },
+        "root_id":      { "type": "string" },
+        "frontmatter":  { "$ref": "#/$defs/Frontmatter" },
+        "content_hash": { "type": "string" },
+        "minhash": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "assets":     { "type": "array", "items": { "$ref": "#/$defs/Asset" } },
+        "cluster_id": { "type": "string" }
+      }
+    },
+    "Cluster": {
+      "type": "object",
+      "required": ["id", "kind", "similarity", "members"],
+      "properties": {
+        "id":         { "type": "string" },
+        "kind":       { "type": "string", "enum": ["exact", "near"] },
+        "similarity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "members":    { "type": "array", "items": { "type": "string" }, "minItems": 2 }
+      }
+    },
+    "Stats": {
+      "type": "object",
+      "required": [
+        "scanned_paths",
+        "elapsed_ms",
+        "primary_skills",
+        "secondary_skills",
+        "duplicate_clusters"
+      ],
+      "properties": {
+        "scanned_paths":      { "type": "integer", "minimum": 0 },
+        "elapsed_ms":         { "type": "integer", "minimum": 0 },
+        "primary_skills":     { "type": "integer", "minimum": 0 },
+        "secondary_skills":   { "type": "integer", "minimum": 0 },
+        "duplicate_clusters": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

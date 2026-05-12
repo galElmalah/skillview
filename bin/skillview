@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# skillview — dev wrapper. Builds the Rust binary if needed and execs it.
+# The binary itself drives both the CLI (default, agent-friendly JSON) and
+# the OpenTUI frontend (`--tui`).
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+bin="${SKILLVIEW_BIN:-}"
+if [[ -z "$bin" ]]; then
+  if [[ -x "$here/target/release/skillview" ]]; then
+    bin="$here/target/release/skillview"
+  elif [[ -x "$here/target/debug/skillview" ]]; then
+    bin="$here/target/debug/skillview"
+  else
+    echo "skillview: building Rust binary (one-time)…" >&2
+    (cd "$here" && cargo build --release -p skillview >&2)
+    bin="$here/target/release/skillview"
+  fi
+fi
+
+# If the caller asked for the TUI, make sure Bun deps are installed.
+for arg in "$@"; do
+  if [[ "$arg" == "--tui" ]]; then
+    if [[ ! -d "$here/tui/node_modules" ]]; then
+      echo "skillview: installing Bun deps (one-time)…" >&2
+      (cd "$here/tui" && bun install >&2)
+    fi
+    break
+  fi
+done
+
+exec "$bin" "$@"

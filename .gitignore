@@ -1,0 +1,15 @@
+target/
+**/*.rs.bk
+**/Cargo.lock.bak
+
+node_modules/
+.bun/
+bun.lockb
+.DS_Store
+
+dist/
+out/
+
+# scratch
+tmp/
+*.json.tmp
