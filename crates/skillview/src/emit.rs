@@ -2,7 +2,7 @@ use crate::classify::classify_root;
 use crate::minhash;
 use crate::model::{
     Asset, Cluster, ClusterKind, Frontmatter, Inventory, Root, RootKind, Skill, SkillTier, Stats,
-    Usage, UsageConfidence, SCHEMA_VERSION,
+    Tokens, Usage, UsageConfidence, Validation, SCHEMA_VERSION,
 };
 use crate::parse::{self, ParsedSkill};
 use crate::scan::{self, Candidate};
@@ -176,6 +176,14 @@ fn build_skill(
     let sig = minhash::signature(&normalized);
 
     let assets = collect_assets(&dir, &cand.path, &parsed.references);
+    let tokens = compute_tokens(parsed.frontmatter.as_ref(), &parsed.body);
+    let validation = validate(
+        cand.tier,
+        parsed.frontmatter.as_ref(),
+        &parsed.body,
+        &name,
+        &dir,
+    );
 
     let skill = Skill {
         id: id.clone(),
@@ -191,6 +199,8 @@ fn build_skill(
         assets,
         cluster_id: None,
         usage: Usage::default(),
+        tokens,
+        validation,
     };
 
     let sig_input = if opts.skip_similarity {
@@ -267,6 +277,89 @@ fn collect_assets(
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
+}
+
+/// Heuristic: chars / 3.7, rounded up. Empirically within ~10% of cl100k_base
+/// for English markdown, which is enough resolution for "is this skill cheap
+/// or expensive to load into context".
+fn approx_tokens(s: &str) -> u32 {
+    let chars = s.chars().count();
+    if chars == 0 {
+        return 0;
+    }
+    ((chars as f64 / 3.7).ceil() as u32).max(1)
+}
+
+fn compute_tokens(fm: Option<&Frontmatter>, body: &str) -> Tokens {
+    let description = fm
+        .and_then(|f| f.description.as_deref())
+        .map(approx_tokens)
+        .unwrap_or(0);
+    let body = approx_tokens(body);
+    Tokens {
+        description,
+        body,
+        total: description.saturating_add(body),
+    }
+}
+
+const DESCRIPTION_MAX_CHARS: usize = 500;
+
+fn validate(
+    tier: SkillTier,
+    fm: Option<&Frontmatter>,
+    body: &str,
+    resolved_name: &str,
+    dir: &Path,
+) -> Validation {
+    let mut issues = Vec::new();
+
+    let name = fm.and_then(|f| f.name.as_deref().filter(|s| !s.trim().is_empty()));
+    let desc = fm.and_then(|f| f.description.as_deref().filter(|s| !s.trim().is_empty()));
+
+    if name.is_none() {
+        issues.push("missing `name` in frontmatter".to_string());
+    }
+    if desc.is_none() {
+        issues.push("missing `description` in frontmatter".to_string());
+    }
+    if let Some(d) = desc {
+        let len = d.chars().count();
+        if len > DESCRIPTION_MAX_CHARS {
+            issues.push(format!(
+                "description is {} chars (>{} recommended)",
+                len, DESCRIPTION_MAX_CHARS
+            ));
+        }
+    }
+    if body.trim().is_empty() {
+        issues.push("body is empty".to_string());
+    }
+
+    // Primary skills live in their own folder named after the skill — if the
+    // frontmatter name and the directory name disagree, one was renamed and
+    // the other wasn't. Secondary skills don't follow this convention.
+    if tier == SkillTier::Primary {
+        if let Some(n) = name {
+            if let Some(dirname) = dir.file_name().and_then(|s| s.to_str()) {
+                if !n.eq_ignore_ascii_case(dirname) {
+                    issues.push(format!(
+                        "frontmatter name `{}` does not match directory `{}`",
+                        n, dirname
+                    ));
+                }
+            }
+        }
+    }
+
+    // resolved_name is what we'd display; not validated separately — it's
+    // populated from the frontmatter or the dir already.
+    let _ = resolved_name;
+
+    Validation {
+        ok: issues.is_empty(),
+        issues,
+    }
 }
 
 #[allow(unused_variables)]

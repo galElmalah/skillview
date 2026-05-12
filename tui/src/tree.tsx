@@ -49,6 +49,7 @@ export function filterTree(
 
   return nodes.filter((n) => {
     if (n.kind === "skill") return keepSkill.has(n.id);
+    if (n.kind === "reference") return false; // search ignores references
     return keepGroup.has(n.id);
   });
 }
@@ -71,9 +72,28 @@ export type TreeNode =
   | { kind: "agent"; id: string; agent: string; childCount: number }
   | { kind: "root"; id: string; parentId: string; root: Root; childCount: number }
   | { kind: "tier"; id: string; parentId: string; tier: SkillTier; childCount: number }
-  | { kind: "skill"; id: string; parentId: string; skillId: string };
+  | {
+      kind: "skill";
+      id: string;
+      parentId: string;
+      skillId: string;
+      refCount: number;
+    }
+  | {
+      kind: "reference";
+      id: string;
+      parentId: string;
+      skillId: string;
+      relPath: string;
+      absPath: string;
+      sizeBytes: number;
+    };
 
 export type VisibleNode = TreeNode & { depth: number };
+
+export function skillNodeId(skillId: string): string {
+  return `s:${skillId}`;
+}
 
 const AGENT_ORDER = ["claude", "codex", "cursor", "agents", "unknown"];
 const TIER_ORDER: SkillTier[] = ["primary", "secondary"];
@@ -140,12 +160,26 @@ export function buildTreeNodes(inv: Inventory): TreeNode[] {
           childCount: tierSkills.length,
         });
         for (const s of tierSkills) {
+          const sid = `s:${s.id}`;
+          const referenced = s.assets.filter((a) => a.referenced);
           out.push({
             kind: "skill",
-            id: `s:${s.id}`,
+            id: sid,
             parentId: tierId,
             skillId: s.id,
+            refCount: referenced.length,
           });
+          for (const a of referenced) {
+            out.push({
+              kind: "reference",
+              id: `${sid}:ref:${a.path}`,
+              parentId: sid,
+              skillId: s.id,
+              relPath: a.path,
+              absPath: `${s.dir}/${a.path}`,
+              sizeBytes: a.size_bytes,
+            });
+          }
         }
       }
     }
@@ -156,6 +190,7 @@ export function buildTreeNodes(inv: Inventory): TreeNode[] {
 export function flattenVisible(
   nodes: TreeNode[],
   collapsed: Set<string>,
+  expandedSkills: Set<string>,
 ): VisibleNode[] {
   const out: VisibleNode[] = [];
   const hidden = new Set<string>();
@@ -165,9 +200,22 @@ export function flattenVisible(
       continue;
     }
     const depth =
-      n.kind === "agent" ? 0 : n.kind === "root" ? 1 : n.kind === "tier" ? 2 : 3;
+      n.kind === "agent"
+        ? 0
+        : n.kind === "root"
+          ? 1
+          : n.kind === "tier"
+            ? 2
+            : n.kind === "skill"
+              ? 3
+              : 4;
     out.push({ ...n, depth });
-    if (n.kind !== "skill" && collapsed.has(n.id)) {
+    // Agents/roots/tiers default to expanded; they hide children when in
+    // `collapsed`. Skills default to collapsed; they show children only when
+    // explicitly in `expandedSkills`.
+    if (n.kind === "skill") {
+      if (!expandedSkills.has(n.id)) hidden.add(n.id);
+    } else if (n.kind !== "reference" && collapsed.has(n.id)) {
       hidden.add(n.id);
     }
   }
@@ -180,6 +228,7 @@ interface TreeProps {
   visible: VisibleNode[];
   selectedIdx: number;
   inventory: Inventory;
+  expandedSkills: Set<string>;
 }
 
 export function Tree({
@@ -188,6 +237,7 @@ export function Tree({
   visible,
   selectedIdx,
   inventory,
+  expandedSkills,
 }: TreeProps) {
   const skillsById = React.useMemo(
     () => new Map(inventory.skills.map((s) => [s.id, s])),
@@ -217,6 +267,7 @@ export function Tree({
               inventory={inventory}
               skillsById={skillsById}
               width={width - 2}
+              expandedSkills={expandedSkills}
             />
           );
         })}
@@ -231,17 +282,19 @@ function TreeRow({
   inventory,
   skillsById,
   width,
+  expandedSkills,
 }: {
   node: VisibleNode;
   isSelected: boolean;
   inventory: Inventory;
   skillsById: Map<string, ReturnType<Inventory["skills"]["find"]> extends infer T ? T : Skill>;
   width: number;
+  expandedSkills: Set<string>;
 }) {
   const indent = "  ".repeat(node.depth);
   const bg = isSelected ? "#2a3144" : undefined;
   const fg = isSelected ? "#ffffff" : nodeColor(node);
-  const label = renderLabel(node, inventory, skillsById);
+  const label = renderLabel(node, inventory, skillsById, expandedSkills);
   const text = `${indent}${label}`;
   const truncated =
     text.length > width ? text.slice(0, Math.max(1, width - 1)) + "…" : text;
@@ -262,6 +315,8 @@ function nodeColor(node: TreeNode): string {
       return "#e0af68";
     case "skill":
       return "#c0caf5";
+    case "reference":
+      return "#5c6370";
   }
 }
 
@@ -269,6 +324,7 @@ function renderLabel(
   node: TreeNode,
   inventory: Inventory,
   skillsById: Map<string, any>,
+  expandedSkills: Set<string>,
 ): string {
   switch (node.kind) {
     case "agent":
@@ -283,6 +339,11 @@ function renderLabel(
     case "skill": {
       const s = skillsById.get(node.skillId);
       if (!s) return "??";
+      const isExpanded = expandedSkills.has(node.id);
+      const refMarker =
+        node.refCount > 0
+          ? `${isExpanded ? "▾" : "▸"} • ${s.name}`
+          : `· • ${s.name}`;
       const dupBadge = s.cluster_id
         ? (() => {
             const c = inventory.clusters.find((c) => c.id === s.cluster_id);
@@ -293,9 +354,20 @@ function renderLabel(
               : `  ≈ ${(c.similarity * 100).toFixed(0)}% (${count})`;
           })()
         : "";
-      return `• ${s.name}${usageBadge(s)}${dupBadge}`;
+      const refBadge =
+        node.refCount > 0 ? `  ⊕ ${node.refCount} ref${node.refCount === 1 ? "" : "s"}` : "";
+      return `${refMarker}${refBadge}${usageBadge(s)}${dupBadge}`;
+    }
+    case "reference": {
+      return `└─ ${node.relPath}  (${formatBytes(node.sizeBytes)})`;
     }
   }
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}K`;
+  return `${(n / 1024 / 1024).toFixed(1)}M`;
 }
 
 function compactPath(p: string): string {

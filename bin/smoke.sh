@@ -32,7 +32,7 @@ if ! command -v jq >/dev/null 2>&1; then
 import json, sys
 with open(sys.argv[1]) as f:
     inv = json.load(f)
-assert inv["schema_version"] == 1, "schema_version must be 1"
+assert inv["schema_version"] == 2, "schema_version must be 2"
 assert isinstance(inv["roots"], list), "roots must be a list"
 assert isinstance(inv["skills"], list), "skills must be a list"
 assert isinstance(inv["clusters"], list), "clusters must be a list"
@@ -40,7 +40,7 @@ print(f"  ok: {len(inv['skills'])} skills · {len(inv['roots'])} roots · {len(i
 PY
 else
   schema_version=$(jq -r '.schema_version' "$out")
-  [[ "$schema_version" == "1" ]] || fail "schema_version mismatch: $schema_version"
+  [[ "$schema_version" == "2" ]] || fail "schema_version mismatch: $schema_version"
   roots=$(jq '.roots | length' "$out")
   skills=$(jq '.skills | length' "$out")
   clusters=$(jq '.clusters | length' "$out")

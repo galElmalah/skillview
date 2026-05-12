@@ -18,7 +18,7 @@ import {
 } from "./bridge";
 import type { Inventory, Skill } from "./types";
 
-const STALE_AFTER_SECONDS = 60 * 60;
+const STALE_AFTER_SECONDS = 24 * 60 * 60;
 const SPINNER = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 
 export interface AppProps {
@@ -43,6 +43,11 @@ export function App({ binary, initial }: AppProps) {
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  // Skill nodes default to *collapsed* (showing references is opt-in via enter).
+  // This set holds the IDs of skill nodes the user has expanded.
+  const [expandedSkills, setExpandedSkills] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [frame, setFrame] = useState(0);
 
@@ -136,8 +141,13 @@ export function App({ binary, initial }: AppProps) {
   );
 
   const visible = useMemo(
-    () => flattenVisible(filteredTree, query.trim() ? new Set() : collapsed),
-    [filteredTree, collapsed, query],
+    () =>
+      flattenVisible(
+        filteredTree,
+        query.trim() ? new Set() : collapsed,
+        expandedSkills,
+      ),
+    [filteredTree, collapsed, expandedSkills, query],
   );
 
   // Clamp selection if it ran off the end after a filter change.
@@ -150,9 +160,15 @@ export function App({ binary, initial }: AppProps) {
   }, [visible.length, selectedIdx]);
 
   const selected = visible[Math.min(selectedIdx, visible.length - 1)];
+  // Reference rows still drive the right pane via their parent skill, so the
+  // user sees consistent detail while navigating into refs.
+  const selectedSkillId =
+    selected?.kind === "skill" || selected?.kind === "reference"
+      ? selected.skillId
+      : undefined;
   const selectedSkill =
-    inventory && selected?.kind === "skill"
-      ? inventory.skills.find((s) => s.id === selected.skillId)
+    inventory && selectedSkillId
+      ? inventory.skills.find((s) => s.id === selectedSkillId)
       : undefined;
 
   // Lazily load (and cache) the content for the currently-selected skill so
@@ -278,7 +294,7 @@ export function App({ binary, initial }: AppProps) {
     });
     // Selection updates next render via the useEffect that watches `visible`.
     setTimeout(() => {
-      const flat = flattenVisible(tree, collapsed);
+      const flat = flattenVisible(tree, collapsed, expandedSkills);
       const idx = flat.findIndex((n) => n.id === nodeId);
       if (idx >= 0) setSelectedIdx(idx);
     }, 0);
@@ -412,7 +428,13 @@ export function App({ binary, initial }: AppProps) {
     } else if (key.name === "end" || key.sequence === "G") {
       jumpTo(visible.length - 1);
     } else if (key.name === "right" || key.name === "l") {
-      if (selected && selected.kind !== "skill") {
+      if (selected?.kind === "skill" && selected.refCount > 0) {
+        setExpandedSkills((prev) => {
+          const next = new Set(prev);
+          next.add(selected.id);
+          return next;
+        });
+      } else if (selected && selected.kind !== "skill" && selected.kind !== "reference") {
         setCollapsed((prev) => {
           const next = new Set(prev);
           next.delete(selected.id);
@@ -420,7 +442,24 @@ export function App({ binary, initial }: AppProps) {
         });
       }
     } else if (key.name === "left" || key.name === "h") {
-      if (selected && selected.kind !== "skill") {
+      if (selected?.kind === "skill") {
+        // Collapse the skill if expanded; otherwise no-op (could jump to parent
+        // later if there's demand).
+        setExpandedSkills((prev) => {
+          if (!prev.has(selected.id)) return prev;
+          const next = new Set(prev);
+          next.delete(selected.id);
+          return next;
+        });
+      } else if (selected?.kind === "reference") {
+        // From a reference row, left arrow collapses the parent skill.
+        setExpandedSkills((prev) => {
+          const next = new Set(prev);
+          next.delete(selected.parentId);
+          return next;
+        });
+      } else if (selected) {
+        // agent/root/tier
         setCollapsed((prev) => {
           const next = new Set(prev);
           next.add(selected.id);
@@ -428,7 +467,18 @@ export function App({ binary, initial }: AppProps) {
         });
       }
     } else if (key.name === "return") {
-      if (selected && selected.kind !== "skill") {
+      if (selected?.kind === "skill") {
+        if (selected.refCount === 0) {
+          setStatusMsg("this skill has no referenced resources");
+        } else {
+          setExpandedSkills((prev) => {
+            const next = new Set(prev);
+            if (next.has(selected.id)) next.delete(selected.id);
+            else next.add(selected.id);
+            return next;
+          });
+        }
+      } else if (selected && selected.kind !== "reference") {
         setCollapsed((prev) => {
           const next = new Set(prev);
           if (next.has(selected.id)) next.delete(selected.id);
@@ -439,7 +489,9 @@ export function App({ binary, initial }: AppProps) {
     } else if (key.name === "r") {
       void rescan();
     } else if (key.name === "d") {
-      if (selectedSkill) {
+      if (selected?.kind === "reference") {
+        setStatusMsg("move to the parent skill row to delete");
+      } else if (selectedSkill) {
         setStatusMsg(null);
         void startDelete(selectedSkill);
       }
@@ -536,6 +588,7 @@ export function App({ binary, initial }: AppProps) {
           visible={visible}
           selectedIdx={Math.min(selectedIdx, visible.length - 1)}
           inventory={inventory}
+          expandedSkills={expandedSkills}
         />
         <box width={1} height={viewportHeight} backgroundColor="#1a1d24" />
         <Detail
@@ -638,7 +691,7 @@ function Footer({
       backgroundColor="#1f2430"
     >
       <text fg="#5c6370">
-        ↑/↓ · pgup/pgdn · ←/→ · v view · c cluster · / search · d delete · ? help · r rescan · q quit
+        ↑/↓ · enter expand refs · ←/→ · v view · c cluster · / search · d delete · ? help · r rescan · q quit
       </text>
       {statusMsg ? (
         <>

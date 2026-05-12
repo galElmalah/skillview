@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -80,6 +80,26 @@ impl Usage {
     }
 }
 
+/// Approximate token counts (`chars / 3.7` heuristic, rounded up). Not exact
+/// — within ~10% of cl100k_base for English markdown; we use it because the
+/// real tokenizer adds a 1MB BPE blob for marginal accuracy on this use case.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Tokens {
+    /// Approximate tokens in the frontmatter `description` field.
+    pub description: u32,
+    /// Approximate tokens in the skill body (after frontmatter).
+    pub body: u32,
+    /// description + body. Frontmatter envelope itself is negligible.
+    pub total: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Validation {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
     pub id: String,
@@ -99,6 +119,10 @@ pub struct Skill {
     pub cluster_id: Option<String>,
     #[serde(default, skip_serializing_if = "is_default_usage")]
     pub usage: Usage,
+    #[serde(default)]
+    pub tokens: Tokens,
+    #[serde(default)]
+    pub validation: Validation,
 }
 
 fn is_default_usage(u: &Usage) -> bool {

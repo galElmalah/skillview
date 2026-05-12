@@ -38,6 +38,17 @@ export interface Usage {
   confidence: UsageConfidence;
 }
 
+export interface Tokens {
+  description: number;
+  body: number;
+  total: number;
+}
+
+export interface Validation {
+  ok: boolean;
+  issues?: string[];
+}
+
 export interface Skill {
   id: string;
   tier: SkillTier;
@@ -52,6 +63,8 @@ export interface Skill {
   assets: Asset[];
   cluster_id?: string;
   usage?: Usage;
+  tokens?: Tokens;
+  validation?: Validation;
 }
 
 export type ClusterKind = "exact" | "near";

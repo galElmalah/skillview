@@ -69,6 +69,14 @@ export function Detail({
       <text fg="#c0caf5">  tier:        {skill.tier}</text>
 
       <text> </text>
+      <text fg="#9ece6a">validation</text>
+      <ValidationBlock skill={skill} width={width} />
+
+      <text> </text>
+      <text fg="#9ece6a">tokens (approx · chars/3.7)</text>
+      <TokensBlock skill={skill} />
+
+      <text> </text>
       <text fg="#9ece6a">usage</text>
       <UsageBlock skill={skill} />
 
@@ -123,6 +131,48 @@ function ContentPreview({
           {truncate(line || " ", width - 2)}
         </text>
       ))}
+    </>
+  );
+}
+
+function ValidationBlock({ skill, width }: { skill: Skill; width: number }) {
+  const v = skill.validation;
+  if (!v) {
+    return <text fg="#5c6370">  (not computed)</text>;
+  }
+  if (v.ok) {
+    return <text fg="#9ece6a">  ✓ valid</text>;
+  }
+  const issues = v.issues ?? [];
+  return (
+    <>
+      <text fg="#f7768e">  ✗ {issues.length} issue{issues.length === 1 ? "" : "s"}</text>
+      {issues.slice(0, 5).map((it, i) => (
+        <text key={i} fg="#e5c07b">{truncate("    · " + it, width - 2)}</text>
+      ))}
+      {issues.length > 5 ? (
+        <text fg="#5c6370">    …and {issues.length - 5} more</text>
+      ) : null}
+    </>
+  );
+}
+
+function TokensBlock({ skill }: { skill: Skill }) {
+  const t = skill.tokens;
+  if (!t) {
+    return <text fg="#5c6370">  (not computed)</text>;
+  }
+  return (
+    <>
+      <text fg="#c0caf5">
+        {"  "}description: ≈{t.description.toLocaleString().padStart(6)}  (in the index)
+      </text>
+      <text fg="#c0caf5">
+        {"  "}body:        ≈{t.body.toLocaleString().padStart(6)}  (on activation)
+      </text>
+      <text fg="#c0caf5">
+        {"  "}total:       ≈{t.total.toLocaleString().padStart(6)}
+      </text>
     </>
   );
 }

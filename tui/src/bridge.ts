@@ -39,7 +39,7 @@ export async function readCache(binary: string): Promise<CachedInventory | null>
     if (binStat && binStat.mtimeMs > cacheStat.mtimeMs) return null;
     const data = await readFile(path, "utf8");
     const inventory = JSON.parse(data) as Inventory;
-    if (inventory.schema_version !== 1) return null;
+    if (inventory.schema_version !== 2) return null;
     const ageSeconds = Math.max(0, (Date.now() - cacheStat.mtimeMs) / 1000);
     return { inventory, ageSeconds, path };
   } catch {
