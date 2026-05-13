@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build
+        run: cargo build --workspace --locked
+
+      - name: cargo test (skillview e2e)
+        run: cargo test -p skillview --tests --locked
+
+      - name: cargo fmt (advisory)
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+
+      - name: cargo clippy (advisory)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        continue-on-error: true

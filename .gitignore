@@ -13,3 +13,7 @@ out/
 # scratch
 tmp/
 *.json.tmp
+
+# rustup writes settings.toml under $HOME — our e2e tests point HOME at the
+# fixture, so this directory gets created during test runs.
+crates/skillview/tests/fixtures/home/.rustup/

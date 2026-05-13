@@ -1,0 +1,5 @@
+{"type":"user","text":"please run \"agent-browser\" on this page"}
+{"type":"assistant","text":"calling agent-browser open https://example.com"}
+{"type":"user","text":"now look at data-analyst output"}
+{"type":"assistant","text":"using \"agent-browser\" again to screenshot"}
+{"type":"user","text":"thanks"}
