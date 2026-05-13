@@ -59,26 +59,56 @@ skillview --no-similarity        # skip MinHash
 skillview --threshold 0.7        # looser dup detection
 skillview --no-usage             # skip cross-agent usage scan
 
-# Subcommands (JSON output, agent-friendly):
-skillview list                          # one-line summary per skill
-skillview list --agent claude
-skillview list --tier primary
-skillview list --name browser           # substring on name
-skillview list --dups-only              # only members of a duplicate cluster
+# Discovery (use these first when you don't know the tree):
+skillview examples               # copy-pasteable recipes (no scan, instant)
+skillview agents                 # per-agent rollup (counts, dups, usage totals)
+skillview roots                  # scanned roots + skill counts
+skillview stats --pretty         # inventory-wide statistics
 
-skillview show agent-browser            # full record + cluster siblings
-skillview show s_3                      # by id
-skillview show ~/.claude/skills/x       # by path substring
+# List with rich filtering + sort + limit + format:
+skillview list --agent claude --tier primary
+skillview list --name browser --sort usage --limit 10
+skillview list --root-kind claude-global --format ids
+skillview list --validation-failed --format paths
+skillview list --has-usage --format tsv
+skillview list --dups-only --dup-kind near --min-tokens 1000
 
-skillview dups                          # all duplicate clusters
+# Inspect one skill (id | name | path substring):
+skillview show agent-browser
+skillview show s_3
+skillview show ~/.claude/skills/x
+
+# Duplicate clusters:
+skillview dups                          # all
 skillview dups --exact                  # exact-content only
-skillview dups --near                   # MinHash near-dups only
+skillview dups --near --min-size 3 --sort size
+skillview dups --agent claude --format tsv
+
+# Cross-agent usage (session-log scan):
+skillview usage --top 20
+skillview usage --agent claude --sort sessions
+skillview usage --min-mentions 5 --format tsv
+skillview usage --include-low           # include skills with low-confidence counts
+
+# Every subcommand has --help with examples:
+skillview --help
+skillview list --help
+skillview dups --help
+skillview usage --help
 
 # Launch the TUI (requires Bun + the tui/ sources from a checkout):
 skillview --tui
 ```
 
-All subcommands share the scan flags (`--root`, `--threshold`, `--no-similarity`, `--no-usage`, `--include-minhash`, `--pretty`). Default output is compact JSON; pass `--pretty` for human reading. `--tui` is a separate mode — when set, all other flags are forwarded to the TUI's underlying scan via the spawned process.
+All subcommands share the scan flags (`--root`, `--threshold`, `--no-similarity`, `--no-usage`, `--include-minhash`, `--pretty`). Default output is compact JSON; pass `--pretty` for human reading. The `--format` flag on filtered subcommands (`list`, `dups`, `usage`, `agents`, `roots`) opts into `jsonl`, `tsv`, `ids`, `paths`, or `names` for easy piping. `--tui` is a separate mode — when set, all other flags are forwarded to the TUI's underlying scan via the spawned process.
+
+### Filter cheatsheet
+
+`list` filters compose (AND): `--agent`, `--tier`, `--root-kind`, `--name`, `--dups-only`, `--dup-kind`, `--has-usage`, `--min-usage N`, `--min-tokens N`, `--max-tokens N`, `--validation-failed`. Sort with `--sort {agent-name|name|agent|tier|usage|tokens|sessions|path}`. Limit with `--limit N`. Project with `--format {json|jsonl|tsv|ids|paths|names}`.
+
+`dups` filters: `--exact`, `--near`, `--min-size N`, `--agent`, `--root-kind`. Sort with `--sort {size|similarity|kind}`.
+
+`usage` filters: `--agent`, `--min-mentions N`, `--top N`, `--include-low`. Sort with `--sort {mentions|sessions|recent|name}`. Usage counts are only attached to skill names that are reliably distinctive (≥ 6 chars and contain `-` or `_`); names below that bar are marked `confidence: low` and hidden by default.
 
 ## Architecture
 

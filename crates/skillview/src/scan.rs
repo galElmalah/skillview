@@ -101,9 +101,14 @@ pub fn scan(root: &Path) -> ScanOutcome {
     });
 
     let scanned_paths = counter.load(Ordering::Relaxed);
-    let candidates = Arc::try_unwrap(candidates)
+    let mut candidates = Arc::try_unwrap(candidates)
         .map(|m| m.into_inner().unwrap())
         .unwrap_or_else(|arc| arc.lock().unwrap().clone());
+
+    // Sort by path so skill ids (`s_N`, assigned by enumerate order in emit)
+    // are stable across runs against the same tree. Without this, parallel-walk
+    // scheduling decides ordering and `skillview show s_3` is non-reproducible.
+    candidates.sort_by(|a, b| a.path.cmp(&b.path));
 
     ScanOutcome {
         candidates,
