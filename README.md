@@ -4,6 +4,8 @@ Inventory every agent skill on your machine — `SKILL.md` files (Claude convent
 
 The CLI is the primary surface (JSON-by-default, designed for agents). An OpenTUI frontend is opt-in via `--tui`.
 
+> **Are you an agent reading this?** Read [`agents_onboarding.md`](./agents_onboarding.md) first — it's the fastest path from "I have no idea what's here" to "I'm calling the right subcommand with the right filters". Also pinned as a discoverable skill at [`skills/skillview-cli/SKILL.md`](./skills/skillview-cli/SKILL.md).
+
 ```
 ┌ skillview · 47 primary · 12 secondary · 3 dup clusters · scanned 184k paths in 612ms ┐
 │  skills                            │  agent-browser                                  │

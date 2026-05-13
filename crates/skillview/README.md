@@ -5,6 +5,11 @@ plus skill-shaped markdown under `.claude/`, `.codex/`, `.cursor/`, `.agents/`,
 and project-local copies — classify by host agent, detect near-duplicates
 (MinHash + Jaccard), and count cross-agent usage from Claude/Codex session logs.
 
+> **Driving this from an agent loop?** Read
+> [`agents_onboarding.md`](https://github.com/galElmalah/skillview/blob/main/agents_onboarding.md)
+> in the repo first — it's the fastest path from "I have no idea what's here"
+> to "I'm calling the right subcommand with the right filters".
+
 ## Install
 
 ```bash
