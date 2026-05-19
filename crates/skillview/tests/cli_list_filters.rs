@@ -62,12 +62,16 @@ fn agent_filter_codex_returns_three_codex_skills() {
 }
 
 #[test]
-fn agent_filter_unknown_returns_orphan_skill() {
-    let out = cmd().args(["list", "--agent", "unknown"]).output().unwrap();
+fn agent_filter_orphan_returns_orphan_skill() {
+    // The orphan fixture lives at `~/orphan/skills/orphan-skill/SKILL.md`.
+    // The classifier's namespace fallback assigns agent="orphan" from the
+    // top-level dir under $HOME (root kind stays "unknown" since `orphan/`
+    // isn't a recognized agent layout).
+    let out = cmd().args(["list", "--agent", "orphan"]).output().unwrap();
     let (count, skills) = list_payload(&out);
     assert_eq!(count, 1);
     assert_eq!(skills[0]["name"].as_str(), Some("orphan-skill"));
-    assert_eq!(skills[0]["agent"].as_str(), Some("unknown"));
+    assert_eq!(skills[0]["agent"].as_str(), Some("orphan"));
 }
 
 #[test]

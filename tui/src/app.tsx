@@ -10,13 +10,16 @@ import { CommandBar } from "./commandbar";
 import {
   CachedInventory,
   deleteSkill,
+  foldStream,
   loadInventory,
+  loadOptionsFromEnv,
   readSkillContent,
+  streamInventory,
   summarizeDir,
   chooseDeleteTarget,
   writeCache,
 } from "./bridge";
-import type { Inventory, Skill } from "./types";
+import type { Inventory, Skill, StreamEvent, StreamPhase } from "./types";
 
 const STALE_AFTER_SECONDS = 24 * 60 * 60;
 const SPINNER = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
@@ -41,6 +44,15 @@ export function App({ binary, initial }: AppProps) {
   );
   const [error, setError] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+
+  // Live progress driven by streaming events. `phase` indicates which stage
+  // the Rust side is in; `pathsSeen` / `skillsFound` are the latest counts.
+  const [streamProgress, setStreamProgress] = useState<{
+    phase: StreamPhase;
+    pathsSeen: number;
+    skillsFound: number;
+    elapsedMs: number;
+  } | null>(null);
 
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   // Skill nodes default to *collapsed* (showing references is opt-in via enter).
@@ -115,19 +127,52 @@ export function App({ binary, initial }: AppProps) {
     setScanning(true);
     if (!opts.silent) setScanStartedAt(Date.now());
     setError(null);
+    setStreamProgress(null);
+
+    // We still spawn the streaming binary so the loader can tick a live
+    // "scanned N paths · found M skills" counter while work is in flight,
+    // but every non-progress event is just accumulated. The inventory only
+    // hits React state once on `done` — built by folding the captured
+    // events. The earlier live-merge path tried to push partial inventories
+    // into state on every skill/cluster/usage event, which produced trees
+    // that sometimes showed a stale subset and never recovered.
+    const captured: StreamEvent[] = [];
+
     try {
-      const next = await loadInventory({ binary });
-      setInventory(next);
-      setCacheAgeSeconds(0);
-      void writeCache(next);
+      await streamInventory({ binary, ...loadOptionsFromEnv() }, {
+        onEvent: (ev) => {
+          if (ev.event === "progress") {
+            setStreamProgress({
+              phase: ev.phase,
+              pathsSeen: ev.paths_seen,
+              skillsFound: ev.skills_found,
+              elapsedMs: ev.elapsed_ms,
+            });
+            return;
+          }
+          captured.push(ev);
+          if (ev.event === "done") {
+            const inv = foldStream(captured);
+            setInventory(inv);
+            setCacheAgeSeconds(0);
+            void writeCache(inv);
+          }
+        },
+      });
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setScanning(false);
       setScanStartedAt(null);
+      setStreamProgress(null);
       rescanInflight.current = false;
     }
   }
+
+  // `loadInventory` is the non-streaming entry point — kept exported for
+  // tests / future CLI tools that don't need progress ticks. Silence the
+  // unused-import lint without ripping it out.
+  void loadInventory;
 
   const tree = useMemo(
     () => (inventory ? buildTreeNodes(inventory) : []),
@@ -535,6 +580,7 @@ export function App({ binary, initial }: AppProps) {
         frame={frame}
         startedAt={scanStartedAt}
         error={error}
+        progress={streamProgress}
       />
     );
   }
@@ -570,7 +616,12 @@ export function App({ binary, initial }: AppProps) {
     );
   }
 
-  const cacheLabel = formatCacheLabel(cacheAgeSeconds, scanning, frame);
+  const cacheLabel = formatCacheLabel(
+    cacheAgeSeconds,
+    scanning,
+    frame,
+    streamProgress,
+  );
   const previewContent =
     preview && selectedSkill && preview.skillId === selectedSkill.id
       ? preview.content
@@ -717,9 +768,22 @@ interface LoaderProps {
   frame: number;
   startedAt: number | null;
   error: string | null;
+  progress: {
+    phase: StreamPhase;
+    pathsSeen: number;
+    skillsFound: number;
+    elapsedMs: number;
+  } | null;
 }
 
-function Loader({ width, height, frame, startedAt, error }: LoaderProps) {
+function Loader({
+  width,
+  height,
+  frame,
+  startedAt,
+  error,
+  progress,
+}: LoaderProps) {
   const ch = SPINNER[frame % SPINNER.length];
   const elapsed = startedAt
     ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
@@ -746,6 +810,11 @@ function Loader({ width, height, frame, startedAt, error }: LoaderProps) {
           <text fg="#c0caf5">
             scanning your home directory for skills…  ({elapsed}s)
           </text>
+          <text fg="#7aa2f7">
+            {progress
+              ? `${formatCount(progress.pathsSeen)} paths walked · ${progress.skillsFound} skills found`
+              : "starting…"}
+          </text>
           <text fg="#5c6370">
             first run; future runs read from ~/.cache/skillview/inventory.json
           </text>
@@ -755,13 +824,28 @@ function Loader({ width, height, frame, startedAt, error }: LoaderProps) {
   );
 }
 
+function formatCount(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
 function formatCacheLabel(
   ageSeconds: number | null,
   scanning: boolean,
   frame: number,
+  progress: {
+    phase: StreamPhase;
+    pathsSeen: number;
+    skillsFound: number;
+    elapsedMs: number;
+  } | null,
 ): string {
   if (scanning) {
     const ch = SPINNER[frame % SPINNER.length];
+    if (progress) {
+      return `${ch} ${formatCount(progress.pathsSeen)} paths · ${progress.skillsFound} skills`;
+    }
     return `${ch} rescanning…`;
   }
   if (ageSeconds == null) return "no cache";

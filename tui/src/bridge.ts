@@ -1,13 +1,42 @@
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import type { Inventory, Skill } from "./types";
+import type { Inventory, Skill, StreamEvent } from "./types";
 
 export interface LoadOptions {
   binary: string;
   root?: string;
   threshold?: number;
   noSimilarity?: boolean;
+  noUsage?: boolean;
+  includeMinhash?: boolean;
+}
+
+/**
+ * Read the user's scan flags from env vars set by the Rust `launch_tui`
+ * launcher. Without this, the bridge would spawn `--stream` with no flags
+ * and the TUI would ignore whatever the user typed on the command line.
+ */
+export function loadOptionsFromEnv(): Omit<LoadOptions, "binary"> {
+  const opts: Omit<LoadOptions, "binary"> = {};
+  if (process.env.SKILLVIEW_TUI_ROOT) {
+    opts.root = process.env.SKILLVIEW_TUI_ROOT;
+  }
+  const threshold = process.env.SKILLVIEW_TUI_THRESHOLD;
+  if (threshold) {
+    const n = Number(threshold);
+    if (Number.isFinite(n)) opts.threshold = n;
+  }
+  if (process.env.SKILLVIEW_TUI_NO_SIMILARITY === "1") {
+    opts.noSimilarity = true;
+  }
+  if (process.env.SKILLVIEW_TUI_NO_USAGE === "1") {
+    opts.noUsage = true;
+  }
+  if (process.env.SKILLVIEW_TUI_INCLUDE_MINHASH === "1") {
+    opts.includeMinhash = true;
+  }
+  return opts;
 }
 
 export interface CachedInventory {
@@ -48,6 +77,18 @@ export async function readCache(binary: string): Promise<CachedInventory | null>
 }
 
 export async function writeCache(inventory: Inventory): Promise<void> {
+  // Honor SKILLVIEW_NO_CACHE for BOTH reads and writes. Tests set this var
+  // to disable cache reads during their isolated runs — without this guard,
+  // a test that scans a fixture (e.g. `./skills` with 1 SKILL.md) would
+  // happily write its tiny inventory over the user's real $HOME cache,
+  // and the next regular TUI launch would render the poisoned 1-skill
+  // result with no obvious way to recover other than re-scanning.
+  if (process.env.SKILLVIEW_NO_CACHE === "1") return;
+  // Likewise, scoped scans (a user-supplied --root that isn't $HOME) should
+  // not overwrite the canonical home-scope cache. The bridge sets
+  // SKILLVIEW_TUI_ROOT only when the user passed --root, so its presence
+  // means "this inventory describes a subset, don't promote it to canonical".
+  if (process.env.SKILLVIEW_TUI_ROOT) return;
   const path = cachePath();
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(inventory), "utf8");
@@ -164,6 +205,8 @@ export async function loadInventory(opts: LoadOptions): Promise<Inventory> {
   if (opts.root) args.push("--root", opts.root);
   if (opts.threshold != null) args.push("--threshold", String(opts.threshold));
   if (opts.noSimilarity) args.push("--no-similarity");
+  if (opts.noUsage) args.push("--no-usage");
+  if (opts.includeMinhash) args.push("--include-minhash");
 
   const proc = Bun.spawn([opts.binary, ...args], {
     stdout: "pipe",
@@ -189,6 +232,174 @@ export async function loadInventory(opts: LoadOptions): Promise<Inventory> {
       `skillview produced invalid JSON (${(err as Error).message}). First 200 chars: ${stdoutText.slice(0, 200)}`,
     );
   }
+}
+
+export interface StreamHandlers {
+  onEvent: (event: StreamEvent) => void;
+  signal?: AbortSignal;
+}
+
+/**
+ * Spawn `skillview --stream` and dispatch one parsed event per stdout line.
+ * Returns when the child exits cleanly. `onEvent` is fired synchronously for
+ * each line in order, so React state updates land in the right sequence.
+ *
+ * Failure modes that surface as thrown errors:
+ *   - non-zero exit (stderr included in message)
+ *   - any line that fails to parse as JSON (we never silently drop)
+ */
+export async function streamInventory(
+  opts: LoadOptions,
+  handlers: StreamHandlers,
+): Promise<void> {
+  const args: string[] = ["--stream"];
+  if (opts.root) args.push("--root", opts.root);
+  if (opts.threshold != null) args.push("--threshold", String(opts.threshold));
+  if (opts.noSimilarity) args.push("--no-similarity");
+  if (opts.noUsage) args.push("--no-usage");
+  if (opts.includeMinhash) args.push("--include-minhash");
+
+  const proc = Bun.spawn([opts.binary, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const abortHandler = () => {
+    try {
+      proc.kill();
+    } catch {
+      /* already exited */
+    }
+  };
+  handlers.signal?.addEventListener("abort", abortHandler);
+
+  // Drain stderr concurrently so a chatty child doesn't deadlock on a full
+  // pipe buffer while we're parsing stdout.
+  const stderrPromise = new Response(proc.stderr).text();
+
+  const decoder = new TextDecoder();
+  let buf = "";
+  const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let event: StreamEvent;
+        try {
+          event = JSON.parse(line) as StreamEvent;
+        } catch (err) {
+          throw new Error(
+            `skillview produced invalid stream JSON (${(err as Error).message}). Line: ${line.slice(0, 200)}`,
+          );
+        }
+        handlers.onEvent(event);
+      }
+    }
+    // Flush any trailing partial line (shouldn't happen — Rust side always
+    // newline-terminates — but be defensive).
+    buf += decoder.decode();
+    const tail = buf.trim();
+    if (tail) {
+      try {
+        handlers.onEvent(JSON.parse(tail) as StreamEvent);
+      } catch {
+        /* swallow — final flush is best-effort */
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* ignore */
+    }
+    handlers.signal?.removeEventListener("abort", abortHandler);
+  }
+
+  const code = await proc.exited;
+  const stderrText = await stderrPromise;
+  if (code !== 0 && !handlers.signal?.aborted) {
+    throw new Error(
+      `skillview --stream exited ${code}: ${stderrText.trim() || "<no stderr>"}`,
+    );
+  }
+}
+
+/**
+ * Fold a sequence of `StreamEvent`s into a complete `Inventory`. Mirrors what
+ * the non-streaming Rust path returns — used both by the TUI (after a stream
+ * finishes, to write the cache) and as a test helper.
+ *
+ * Skill events with `cluster_id: undefined` are merged with the assignments
+ * from the later `clusters` event, and `usage` events overlay their per-skill
+ * map. `roots` is taken from the dedicated `roots` event.
+ */
+export function foldStream(events: Iterable<StreamEvent>): Inventory {
+  const skills: Skill[] = [];
+  const skillById = new Map<string, Skill>();
+  let roots: Inventory["roots"] = [];
+  let clusters: Inventory["clusters"] = [];
+  let stats: Inventory["stats"] = {
+    scanned_paths: 0,
+    elapsed_ms: 0,
+    primary_skills: 0,
+    secondary_skills: 0,
+    duplicate_clusters: 0,
+  };
+  let generatedAt = "";
+  let schemaVersion = 2;
+
+  for (const ev of events) {
+    switch (ev.event) {
+      case "start":
+        schemaVersion = ev.schema_version;
+        break;
+      case "skill": {
+        skills.push(ev.skill);
+        skillById.set(ev.skill.id, ev.skill);
+        break;
+      }
+      case "roots":
+        roots = ev.roots;
+        break;
+      case "clusters": {
+        clusters = ev.clusters;
+        for (const [skillId, clusterId] of Object.entries(ev.assignments)) {
+          const s = skillById.get(skillId);
+          if (s) s.cluster_id = clusterId;
+        }
+        break;
+      }
+      case "usage": {
+        for (const [skillId, u] of Object.entries(ev.by_skill)) {
+          const s = skillById.get(skillId);
+          if (s) s.usage = u;
+        }
+        break;
+      }
+      case "done":
+        stats = ev.stats;
+        generatedAt = ev.generated_at;
+        break;
+      case "progress":
+        // No state to merge.
+        break;
+    }
+  }
+
+  return {
+    schema_version: schemaVersion,
+    generated_at: generatedAt,
+    roots,
+    skills,
+    clusters,
+    stats,
+  };
 }
 
 export function resolveBinary(): string {

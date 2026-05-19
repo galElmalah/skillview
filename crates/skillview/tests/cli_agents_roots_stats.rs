@@ -67,8 +67,11 @@ fn agents_default_json_shape_and_counts() {
     assert_eq!(codex["primary"].as_u64(), Some(3));
     assert_eq!(codex["secondary"].as_u64(), Some(0));
 
-    // cursor / agents / unknown each have skills=1.
-    for name in &["cursor", "agents", "unknown"] {
+    // cursor / agents / orphan each have skills=1. (The fixture's orphan
+    // skill at `~/orphan/skills/orphan-skill/SKILL.md` gets agent="orphan"
+    // from the namespace-derivation fallback — the top-level dir under
+    // $HOME is the agent name.)
+    for name in &["cursor", "agents", "orphan"] {
         let row = agent_row(&agents, name);
         assert_eq!(
             row["skills"].as_u64(),
@@ -95,7 +98,7 @@ fn agents_with_similarity_default_threshold_dup_members() {
 
     assert_eq!(agent_row(&agents, "claude")["dup_members"].as_u64(), Some(1));
     assert_eq!(agent_row(&agents, "codex")["dup_members"].as_u64(), Some(1));
-    for name in &["cursor", "agents", "unknown"] {
+    for name in &["cursor", "agents", "orphan"] {
         assert_eq!(
             agent_row(&agents, name)["dup_members"].as_u64(),
             Some(0),
@@ -179,7 +182,7 @@ fn agents_format_names_emits_agent_names() {
     let lines = stdout_lines(&out);
     assert_eq!(lines.len(), 5);
     let expected: std::collections::HashSet<&str> =
-        ["claude", "codex", "cursor", "agents", "unknown"]
+        ["claude", "codex", "cursor", "agents", "orphan"]
             .iter()
             .copied()
             .collect();
@@ -466,7 +469,9 @@ fn stats_default_json_has_all_keys_and_baseline_counts() {
     assert_eq!(agents.get("codex").and_then(Value::as_u64), Some(3));
     assert_eq!(agents.get("cursor").and_then(Value::as_u64), Some(1));
     assert_eq!(agents.get("agents").and_then(Value::as_u64), Some(1));
-    assert_eq!(agents.get("unknown").and_then(Value::as_u64), Some(1));
+    // Was "unknown" pre-namespace-classifier; orphan/ now derives its own
+    // agent name. Root kind is still "unknown" (see root_kinds map below).
+    assert_eq!(agents.get("orphan").and_then(Value::as_u64), Some(1));
 
     // root_kinds map covers all six kinds.
     let root_kinds = v["root_kinds"].as_object().expect("root_kinds map");

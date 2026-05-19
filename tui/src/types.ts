@@ -95,3 +95,37 @@ export interface Inventory {
   clusters: Cluster[];
   stats: Stats;
 }
+
+// ----- streaming events (mirrors emit::Event in Rust) -----
+
+export type StreamPhase = "walk" | "parse" | "cluster" | "usage";
+
+export type StreamEvent =
+  | {
+      event: "start";
+      root: string;
+      started_at: string;
+      schema_version: number;
+    }
+  | {
+      event: "progress";
+      phase: StreamPhase;
+      paths_seen: number;
+      skills_found: number;
+      elapsed_ms: number;
+    }
+  | { event: "skill"; skill: Skill }
+  | { event: "roots"; roots: Root[] }
+  | {
+      event: "clusters";
+      clusters: Cluster[];
+      assignments: Record<string, string>;
+    }
+  | {
+      event: "usage";
+      by_skill: Record<string, Usage>;
+      session_files: number;
+      bytes_scanned: number;
+      elapsed_ms: number;
+    }
+  | { event: "done"; stats: Stats; generated_at: string };

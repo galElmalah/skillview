@@ -60,6 +60,7 @@ skillview --root ~/code/project
 skillview --no-similarity        # skip MinHash
 skillview --threshold 0.7        # looser dup detection
 skillview --no-usage             # skip cross-agent usage scan
+skillview --stream               # NDJSON events as work happens (start → progress → skill … → done)
 
 # Discovery (use these first when you don't know the tree):
 skillview examples               # copy-pasteable recipes (no scan, instant)

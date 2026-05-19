@@ -8,7 +8,8 @@ use crate::parse::{self, ParsedSkill};
 use crate::scan::{self, Candidate};
 use crate::usage;
 use anyhow::Result;
-use std::collections::HashMap;
+use serde::Serialize;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -21,21 +22,127 @@ pub struct BuildOptions {
     pub skip_usage: bool,
 }
 
+/// Phase tags for `Event::Progress`. Stable strings — consumers (CLI, TUI)
+/// switch on these to update the phase indicator.
+pub mod phase {
+    pub const WALK: &str = "walk";
+    pub const PARSE: &str = "parse";
+    pub const CLUSTER: &str = "cluster";
+    pub const USAGE: &str = "usage";
+}
+
+/// Streaming event emitted by `build_streaming` as work progresses. The shape
+/// is deliberately flat — each variant is a self-contained NDJSON record so
+/// consumers can route on the `event` tag without buffering.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event", rename_all = "lowercase")]
+pub enum Event {
+    /// Scan kicked off. Emitted before any other event.
+    Start {
+        root: String,
+        started_at: String,
+        schema_version: u32,
+    },
+    /// Periodic progress tick. `phase` is one of [`phase::WALK`],
+    /// [`phase::PARSE`], [`phase::CLUSTER`], [`phase::USAGE`]. Skipped phases
+    /// are simply absent.
+    Progress {
+        phase: &'static str,
+        paths_seen: usize,
+        skills_found: usize,
+        elapsed_ms: u128,
+    },
+    /// A single skill record, emitted as soon as it is parsed and validated.
+    /// `cluster_id` is `None` here — assignments arrive later via
+    /// [`Event::Clusters`].
+    Skill { skill: Skill },
+    /// Final list of scanned roots, after the walk completes.
+    Roots { roots: Vec<Root> },
+    /// Clustering results plus skill-id → cluster-id assignments. Consumers
+    /// merge `assignments` into the partial inventory they have built up
+    /// from preceding `Skill` events.
+    Clusters {
+        clusters: Vec<Cluster>,
+        assignments: BTreeMap<String, String>,
+    },
+    /// Per-skill usage counts plus scan stats. Consumers merge `by_skill`
+    /// into the partial inventory.
+    Usage {
+        by_skill: BTreeMap<String, Usage>,
+        session_files: usize,
+        bytes_scanned: u64,
+        elapsed_ms: u128,
+    },
+    /// Final stats; signals end of stream.
+    Done {
+        stats: Stats,
+        generated_at: String,
+    },
+}
+
 pub fn build(opts: BuildOptions) -> Result<Inventory> {
+    build_streaming(opts, |_| {})
+}
+
+/// Build the full inventory while emitting progressive `Event`s through
+/// `sink`. The returned `Inventory` is identical to what `build` produces;
+/// streaming is purely additive (consumers may ignore events entirely).
+pub fn build_streaming<F>(opts: BuildOptions, mut sink: F) -> Result<Inventory>
+where
+    F: FnMut(Event),
+{
     let start = Instant::now();
-    let outcome = scan::scan(&opts.root);
+    let started_at = now_iso8601();
+
+    sink(Event::Start {
+        root: opts.root.to_string_lossy().to_string(),
+        started_at: started_at.clone(),
+        schema_version: SCHEMA_VERSION,
+    });
+
+    // Walk phase — emit progress ticks while the parallel walker runs.
+    let outcome = {
+        let phase_start = start;
+        // Inline sink call inside the ticker would borrow `sink` across the
+        // closure boundary; instead capture ticks into a small buffer and
+        // flush them after `scan_with_ticker` returns. Tick rate is ~120ms
+        // so the buffer stays tiny even on slow filesystems.
+        let mut ticks: Vec<(usize, usize, u128)> = Vec::new();
+        let outcome = scan::scan_with_ticker(&opts.root, |paths, hits| {
+            ticks.push((paths, hits, phase_start.elapsed().as_millis()));
+        });
+        for (paths, hits, elapsed_ms) in ticks {
+            sink(Event::Progress {
+                phase: phase::WALK,
+                paths_seen: paths,
+                skills_found: hits,
+                elapsed_ms,
+            });
+        }
+        outcome
+    };
 
     let mut roots: Vec<Root> = Vec::new();
     let mut root_index: HashMap<PathBuf, String> = HashMap::new();
     let mut skills: Vec<Skill> = Vec::new();
     let mut sig_inputs: Vec<(String, String, Vec<u64>)> = Vec::new();
 
+    // Parse phase — emit a Skill event per file as it is parsed, and a
+    // throttled Progress tick so big inventories show forward motion.
+    let mut last_tick_ms: u128 = 0;
     for (idx, cand) in outcome.candidates.iter().enumerate() {
         match build_skill(idx, cand, &opts, &mut roots, &mut root_index) {
             Ok(Some((skill, sig_input))) => {
                 if let Some(input) = sig_input {
                     sig_inputs.push(input);
                 }
+                // Emit the skill event first so the consumer sees it before
+                // we mutate it further (cluster assignment, usage merge).
+                let mut for_event = skill.clone();
+                if !opts.include_minhash_in_output {
+                    for_event.minhash = None;
+                }
+                sink(Event::Skill { skill: for_event });
                 skills.push(skill);
             }
             Ok(None) => {}
@@ -44,9 +151,33 @@ pub fn build(opts: BuildOptions) -> Result<Inventory> {
                 // (Could be exposed via a --verbose flag later.)
             }
         }
+        let now_ms = start.elapsed().as_millis();
+        // Tick every ~120ms during parse so the consumer can update a
+        // "parsed N of M" indicator without being flooded.
+        if now_ms.saturating_sub(last_tick_ms) >= 120 {
+            sink(Event::Progress {
+                phase: phase::PARSE,
+                paths_seen: idx + 1,
+                skills_found: skills.len(),
+                elapsed_ms: now_ms,
+            });
+            last_tick_ms = now_ms;
+        }
     }
 
+    sink(Event::Roots {
+        roots: roots.clone(),
+    });
+
+    // Cluster phase.
+    sink(Event::Progress {
+        phase: phase::CLUSTER,
+        paths_seen: outcome.scanned_paths,
+        skills_found: skills.len(),
+        elapsed_ms: start.elapsed().as_millis(),
+    });
     let mut clusters: Vec<Cluster> = Vec::new();
+    let mut cluster_assignments: BTreeMap<String, String> = BTreeMap::new();
     if !opts.skip_similarity && !sig_inputs.is_empty() {
         let clustering = minhash::cluster(&sig_inputs, opts.threshold);
         for (cid, kind_str, sim, members) in &clustering.clusters {
@@ -63,9 +194,14 @@ pub fn build(opts: BuildOptions) -> Result<Inventory> {
         for skill in skills.iter_mut() {
             if let Some(cid) = clustering.assignments.get(&skill.id) {
                 skill.cluster_id = Some(cid.clone());
+                cluster_assignments.insert(skill.id.clone(), cid.clone());
             }
         }
     }
+    sink(Event::Clusters {
+        clusters: clusters.clone(),
+        assignments: cluster_assignments,
+    });
 
     if !opts.include_minhash_in_output {
         for skill in skills.iter_mut() {
@@ -73,9 +209,13 @@ pub fn build(opts: BuildOptions) -> Result<Inventory> {
         }
     }
 
-    // Cross-agent usage scan: counts mentions in Claude + Codex session logs.
-    // Only skills whose names are distinctive enough (len>=6 + hyphen/underscore)
-    // get scanned; short common-word names would be drowned in false positives.
+    // Usage phase.
+    sink(Event::Progress {
+        phase: phase::USAGE,
+        paths_seen: outcome.scanned_paths,
+        skills_found: skills.len(),
+        elapsed_ms: start.elapsed().as_millis(),
+    });
     let usage_stats = if opts.skip_usage {
         Default::default()
     } else {
@@ -96,6 +236,7 @@ pub fn build(opts: BuildOptions) -> Result<Inventory> {
         }
         match usage::scan(&opts.home, &reliable_names) {
             Ok(outcome) => {
+                let mut by_skill: BTreeMap<String, Usage> = BTreeMap::new();
                 for (pat_idx, u) in outcome.by_pattern.iter().enumerate() {
                     let skill_idx = reliable_indices[pat_idx];
                     let s = &mut skills[skill_idx];
@@ -103,10 +244,25 @@ pub fn build(opts: BuildOptions) -> Result<Inventory> {
                     s.usage.sessions = u.sessions;
                     s.usage.last_seen_at = u.last_seen_unix.map(usage::unix_to_iso8601);
                     s.usage.by_source = u.by_source.clone();
+                    by_skill.insert(s.id.clone(), s.usage.clone());
                 }
+                sink(Event::Usage {
+                    by_skill,
+                    session_files: outcome.stats.session_files,
+                    bytes_scanned: outcome.stats.bytes_scanned,
+                    elapsed_ms: outcome.stats.elapsed_ms,
+                });
                 outcome.stats
             }
-            Err(_) => Default::default(),
+            Err(_) => {
+                sink(Event::Usage {
+                    by_skill: BTreeMap::new(),
+                    session_files: 0,
+                    bytes_scanned: 0,
+                    elapsed_ms: 0,
+                });
+                Default::default()
+            }
         }
     };
 
@@ -123,10 +279,16 @@ pub fn build(opts: BuildOptions) -> Result<Inventory> {
         usage_bytes_scanned: usage_stats.bytes_scanned,
         usage_elapsed_ms: usage_stats.elapsed_ms,
     };
+    let generated_at = now_iso8601();
+
+    sink(Event::Done {
+        stats: stats.clone(),
+        generated_at: generated_at.clone(),
+    });
 
     Ok(Inventory {
         schema_version: SCHEMA_VERSION,
-        generated_at: now_iso8601(),
+        generated_at,
         roots,
         skills,
         clusters,

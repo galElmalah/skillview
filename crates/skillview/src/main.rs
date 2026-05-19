@@ -185,6 +185,15 @@ struct ScanArgs {
     /// Pretty-print JSON output.
     #[arg(long, global = true, action = ArgAction::SetTrue)]
     pretty: bool,
+
+    /// Emit NDJSON events on stdout as the scan progresses (`start`,
+    /// `progress`, `skill`, `roots`, `clusters`, `usage`, `done`). One event
+    /// per line — agents and the TUI can render results live. Suppresses the
+    /// usual one-shot JSON output. Only applies to the default scan (and
+    /// `scan` subcommand); filtered subcommands (`list`, `dups`, …) need the
+    /// full inventory and ignore this flag.
+    #[arg(long, global = true, action = ArgAction::SetTrue)]
+    stream: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -439,7 +448,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.tui {
-        return launch_tui();
+        return launch_tui(&cli.scan);
     }
 
     // `examples` is a pure print — don't pay for a scan.
@@ -450,6 +459,23 @@ fn main() -> Result<()> {
 
     let home = dirs::home_dir().context("could not resolve $HOME")?;
     let root = cli.scan.root.clone().unwrap_or_else(|| home.clone());
+
+    // Streaming path: only meaningful for the default / `scan` command,
+    // where the consumer wants the full inventory. Filtered subcommands need
+    // the materialized inventory anyway, so we silently ignore --stream for
+    // them rather than emit a half-baked stream.
+    let stream_mode =
+        cli.scan.stream && matches!(cli.cmd, None | Some(Cmd::Scan));
+    if stream_mode {
+        return run_stream(BuildOptions {
+            root,
+            home,
+            threshold: cli.scan.threshold,
+            include_minhash_in_output: cli.scan.include_minhash,
+            skip_similarity: cli.scan.no_similarity,
+            skip_usage: cli.scan.no_usage,
+        });
+    }
 
     let inventory = emit::build(BuildOptions {
         root,
@@ -566,6 +592,38 @@ fn effective_min_usage(explicit: Option<u64>, has_usage: bool) -> Option<u64> {
         (None, true) => Some(1),
         (None, false) => None,
     }
+}
+
+// ---------- streaming ----------
+
+/// Drive `emit::build_streaming` and write each event as a single NDJSON
+/// line on stdout. Flushes after every event so consumers see progress live
+/// rather than buffered. Errors writing to stdout terminate the stream — we
+/// can't recover from a closed pipe.
+fn run_stream(opts: BuildOptions) -> Result<()> {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    let mut write_err: Option<io::Error> = None;
+    let _inventory = emit::build_streaming(opts, |event| {
+        if write_err.is_some() {
+            return;
+        }
+        if let Err(e) = serde_json::to_writer(&mut out, &event) {
+            write_err = Some(io::Error::other(e));
+            return;
+        }
+        if let Err(e) = out.write_all(b"\n") {
+            write_err = Some(e);
+            return;
+        }
+        // Best-effort flush so partial output is visible even if the consumer
+        // is line-buffered. Ignore failures — the next write will surface them.
+        let _ = out.flush();
+    })?;
+    if let Some(e) = write_err {
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 // ---------- output helpers ----------
@@ -1430,7 +1488,7 @@ skillview usage --help
 
 // ---------- --tui launcher ----------
 
-fn launch_tui() -> Result<()> {
+fn launch_tui(scan: &ScanArgs) -> Result<()> {
     let tui_dir = find_tui_dir().ok_or_else(|| {
         anyhow!(
             "could not locate the OpenTUI sources. Set $SKILLVIEW_TUI_DIR to the \
@@ -1448,17 +1506,33 @@ fn launch_tui() -> Result<()> {
     }
     // Tell the TUI which Rust binary to spawn — itself.
     let self_path = std::env::current_exe().context("could not resolve own exe path")?;
-    let status = Command::new("bun")
-        .arg("run")
-        .arg(&entry)
-        .env("SKILLVIEW_CORE", &self_path)
-        .status()
-        .map_err(|e| {
-            anyhow!(
-                "could not exec `bun run {}`: {e}. Install Bun: https://bun.sh",
-                entry.display()
-            )
-        })?;
+    let mut cmd = Command::new("bun");
+    cmd.arg("run").arg(&entry).env("SKILLVIEW_CORE", &self_path);
+
+    // Forward the user's scan flags into the TUI process via env vars. The
+    // bridge reads these when spawning `skillview --stream` so the user's
+    // `--root`, `--no-usage`, etc. actually take effect — without this they
+    // were silently dropped and the TUI always scanned $HOME.
+    if let Some(root) = &scan.root {
+        cmd.env("SKILLVIEW_TUI_ROOT", root);
+    }
+    cmd.env("SKILLVIEW_TUI_THRESHOLD", scan.threshold.to_string());
+    if scan.no_similarity {
+        cmd.env("SKILLVIEW_TUI_NO_SIMILARITY", "1");
+    }
+    if scan.no_usage {
+        cmd.env("SKILLVIEW_TUI_NO_USAGE", "1");
+    }
+    if scan.include_minhash {
+        cmd.env("SKILLVIEW_TUI_INCLUDE_MINHASH", "1");
+    }
+
+    let status = cmd.status().map_err(|e| {
+        anyhow!(
+            "could not exec `bun run {}`: {e}. Install Bun: https://bun.sh",
+            entry.display()
+        )
+    })?;
     std::process::exit(status.code().unwrap_or(1));
 }
 
